@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -62,6 +61,16 @@ const ScraperInterface = () => {
     setConfig(prev => ({ ...prev, [field]: value }));
   };
 
+  const handleNumberInput = (field: keyof ScrapingConfig, value: string) => {
+    const numValue = parseInt(value);
+    if (!isNaN(numValue) && numValue > 0) {
+      updateConfig(field, numValue);
+    } else if (value === '') {
+      // Allow empty values temporarily during typing
+      updateConfig(field, 0);
+    }
+  };
+
   const validateConfig = (): boolean => {
     if (!config.targetUrl) {
       toast({
@@ -78,6 +87,24 @@ const ScraperInterface = () => {
       toast({
         title: "Configuration Error", 
         description: "Please enter a valid URL",
+        variant: "destructive"
+      });
+      return false;
+    }
+
+    if (config.maxPages <= 0) {
+      toast({
+        title: "Configuration Error",
+        description: "Max pages must be greater than 0",
+        variant: "destructive"
+      });
+      return false;
+    }
+
+    if (config.delayMs < 0) {
+      toast({
+        title: "Configuration Error", 
+        description: "Delay must be 0 or greater",
         variant: "destructive"
       });
       return false;
@@ -214,8 +241,9 @@ const ScraperInterface = () => {
                     <Input
                       id="maxPages"
                       type="number"
-                      value={config.maxPages}
-                      onChange={(e) => updateConfig('maxPages', parseInt(e.target.value))}
+                      min="1"
+                      value={config.maxPages || ''}
+                      onChange={(e) => handleNumberInput('maxPages', e.target.value)}
                       className="bg-slate-700 border-slate-600"
                     />
                   </div>
@@ -224,11 +252,25 @@ const ScraperInterface = () => {
                     <Input
                       id="delay"
                       type="number"
-                      value={config.delayMs}
-                      onChange={(e) => updateConfig('delayMs', parseInt(e.target.value))}
+                      min="0"
+                      value={config.delayMs || ''}
+                      onChange={(e) => handleNumberInput('delayMs', e.target.value)}
                       className="bg-slate-700 border-slate-600"
                     />
                   </div>
+                </div>
+
+                <div>
+                  <Label htmlFor="maxDepth">Max Depth</Label>
+                  <Input
+                    id="maxDepth"
+                    type="number"
+                    min="1"
+                    max="10"
+                    value={config.maxDepth || ''}
+                    onChange={(e) => handleNumberInput('maxDepth', e.target.value)}
+                    className="bg-slate-700 border-slate-600"
+                  />
                 </div>
 
                 <div>
