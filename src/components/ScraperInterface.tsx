@@ -10,7 +10,9 @@ import { Progress } from "@/components/ui/progress";
 import { Terminal, Globe, Download, Settings, Play, Pause, RotateCcw } from 'lucide-react';
 import { useToast } from "@/hooks/use-toast";
 import { ScrapingEngine } from '../utils/ScrapingEngine';
+import { ServerScraper } from '../utils/ServerScraper';
 import { OutputFormatter } from '../utils/OutputFormatter';
+import ScrapingModeSelector from './ScrapingModeSelector';
 
 interface ScrapingConfig {
   targetUrl: string;
@@ -35,6 +37,7 @@ const ScraperInterface = () => {
     contentTypes: ['blog', 'documentation', 'article']
   });
 
+  const [scrapingMode, setScrapingMode] = useState<'browser' | 'server'>('server');
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -66,7 +69,6 @@ const ScraperInterface = () => {
     if (!isNaN(numValue) && numValue > 0) {
       updateConfig(field, numValue);
     } else if (value === '') {
-      // Allow empty values temporarily during typing
       updateConfig(field, 0);
     }
   };
@@ -122,30 +124,49 @@ const ScraperInterface = () => {
     setStats({ pagesScraped: 0, linksFound: 0, errors: 0, dataExtracted: 0 });
     setScrapedData([]);
     
-    addLog(`Starting universal web scraper for: ${config.targetUrl}`, 'info');
+    addLog(`Starting ${scrapingMode} scraping for: ${config.targetUrl}`, 'info');
     addLog(`Configuration: Max ${config.maxPages} pages, ${config.delayMs}ms delay, depth ${config.maxDepth}`, 'info');
 
     try {
-      const engine = new ScrapingEngine(config);
-      
-      engine.onProgress = (current: number, total: number, url: string) => {
-        setProgress((current / total) * 100);
-        setCurrentUrl(url);
-        setStats(prev => ({ ...prev, pagesScraped: current }));
-      };
+      let results;
 
-      engine.onLog = addLog;
-      
-      engine.onStats = (newStats: any) => {
-        setStats(prev => ({ ...prev, ...newStats }));
-      };
+      if (scrapingMode === 'server') {
+        results = await ServerScraper.scrapeWebsite(
+          config,
+          (current: number, total: number, url: string) => {
+            setProgress((current / total) * 100);
+            setCurrentUrl(url);
+            setStats(prev => ({ ...prev, pagesScraped: current }));
+          },
+          addLog,
+          (data: any) => {
+            setScrapedData(prev => [...prev, data]);
+            setStats(prev => ({ ...prev, dataExtracted: prev.dataExtracted + 1 }));
+          }
+        );
+      } else {
+        // Browser mode (existing implementation)
+        const engine = new ScrapingEngine(config);
+        
+        engine.onProgress = (current: number, total: number, url: string) => {
+          setProgress((current / total) * 100);
+          setCurrentUrl(url);
+          setStats(prev => ({ ...prev, pagesScraped: current }));
+        };
 
-      engine.onDataExtracted = (data: any) => {
-        setScrapedData(prev => [...prev, data]);
-        setStats(prev => ({ ...prev, dataExtracted: prev.dataExtracted + 1 }));
-      };
+        engine.onLog = addLog;
+        
+        engine.onStats = (newStats: any) => {
+          setStats(prev => ({ ...prev, ...newStats }));
+        };
 
-      const results = await engine.scrape();
+        engine.onDataExtracted = (data: any) => {
+          setScrapedData(prev => [...prev, data]);
+          setStats(prev => ({ ...prev, dataExtracted: prev.dataExtracted + 1 }));
+        };
+
+        results = await engine.scrape();
+      }
       
       addLog(`Scraping completed! Extracted ${results.items.length} items`, 'success');
       
@@ -215,6 +236,12 @@ const ScraperInterface = () => {
         <div className="grid lg:grid-cols-3 gap-6">
           {/* Configuration Panel */}
           <div className="lg:col-span-1 space-y-6">
+            {/* Scraping Mode Selector */}
+            <ScrapingModeSelector 
+              onModeSelect={setScrapingMode} 
+              selectedMode={scrapingMode}
+            />
+
             <Card className="bg-slate-800/50 border-slate-700">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-white">
