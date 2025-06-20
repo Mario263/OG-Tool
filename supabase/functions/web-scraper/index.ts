@@ -1,4 +1,3 @@
-
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { DOMParser } from "https://deno.land/x/deno_dom@v0.1.38/deno-dom-wasm.ts"
 
@@ -24,6 +23,12 @@ interface ScrapingResult {
   items: ScrapedItem[];
 }
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
 class ServerScraper {
   private config: ScrapingConfig;
   private visitedUrls: Set<string> = new Set();
@@ -37,6 +42,7 @@ class ServerScraper {
   }
 
   async scrape(): Promise<ScrapingResult> {
+    console.log(`Starting scrape for ${this.config.targetUrl}`);
     this.urlQueue.push({ url: this.config.targetUrl, depth: 0 });
 
     let processedCount = 0;
@@ -83,6 +89,8 @@ class ServerScraper {
 
   private async scrapePage(url: string, depth: number): Promise<ScrapedItem | null> {
     try {
+      console.log(`Fetching URL: ${url}`);
+      
       const response = await fetch(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -92,10 +100,13 @@ class ServerScraper {
       });
 
       if (!response.ok) {
+        console.error(`HTTP ${response.status}: ${response.statusText} for ${url}`);
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
       const html = await response.text();
+      console.log(`Successfully fetched ${html.length} characters from ${url}`);
+      
       return this.processPageContent(html, url, depth);
     } catch (error) {
       console.error(`Failed to fetch ${url}:`, error);
@@ -273,42 +284,46 @@ class ServerScraper {
 }
 
 serve(async (req) => {
+  console.log(`Received ${req.method} request`);
+  
   if (req.method === 'OPTIONS') {
-    return new Response('ok', {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST',
-        'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-      },
-    });
+    console.log('Handling CORS preflight request');
+    return new Response('ok', { headers: corsHeaders });
   }
 
   try {
+    console.log('Processing scraping request...');
     const { config } = await req.json();
     
     console.log('Starting server-side scraping for:', config.targetUrl);
+    console.log('Config:', JSON.stringify(config, null, 2));
     
     const scraper = new ServerScraper(config);
     const result = await scraper.scrape();
     
+    console.log('Scraping completed successfully');
+    console.log('Result:', JSON.stringify({ team_id: result.team_id, itemCount: result.items.length }, null, 2));
+    
     return new Response(JSON.stringify(result), {
       headers: {
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
+        ...corsHeaders,
       },
     });
   } catch (error) {
     console.error('Scraping error:', error);
     
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    
     return new Response(JSON.stringify({ 
-      error: error.message,
+      error: errorMessage,
       team_id: 'error',
       items: []
     }), {
       status: 500,
       headers: {
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
+        ...corsHeaders,
       },
     });
   }
