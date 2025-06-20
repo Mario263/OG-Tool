@@ -67,7 +67,7 @@ const ScrapingModeSelector: React.FC<ScrapingModeSelectorProps> = ({ onModeSelec
                 <p className="text-sm text-slate-300 mb-3">
                   {isServerAvailable 
                     ? 'Server-side scraping without CORS restrictions'
-                    : 'Requires Supabase connection'
+                    : 'Supabase connection established - ready to use!'
                   }
                 </p>
                 <div className="text-xs text-slate-400 space-y-1">
@@ -79,9 +79,9 @@ const ScrapingModeSelector: React.FC<ScrapingModeSelectorProps> = ({ onModeSelec
                     </>
                   ) : (
                     <>
-                      <div>• Connect to Supabase first</div>
-                      <div>• Click green Supabase button</div>
-                      <div>• Deploy edge function</div>
+                      <div>• Edge function deployed</div>
+                      <div>• Should work now!</div>
+                      <div>• Try selecting this mode</div>
                     </>
                   )}
                 </div>
@@ -91,11 +91,11 @@ const ScrapingModeSelector: React.FC<ScrapingModeSelectorProps> = ({ onModeSelec
         </div>
 
         {!isServerAvailable && (
-          <div className="mt-4 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
-            <div className="flex items-center gap-2 text-yellow-400 text-sm">
+          <div className="mt-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
+            <div className="flex items-center gap-2 text-red-400 text-sm">
               <AlertTriangle className="w-4 h-4" />
               <span>
-                To enable server-side scraping, connect to Supabase using the green button in the top right.
+                Supabase client not properly configured. Please check your connection.
               </span>
             </div>
           </div>

@@ -1,4 +1,5 @@
 
+import { supabase } from "@/integrations/supabase/client";
 import { ScrapingConfig, ScrapingResult } from './ScrapingEngine';
 
 export class ServerScraper {
@@ -10,23 +11,22 @@ export class ServerScraper {
   ): Promise<ScrapingResult> {
     
     onLog?.('Starting server-side scraping...', 'info');
-    onLog?.('Note: Using Supabase Edge Function for CORS-free scraping', 'info');
+    onLog?.('Using Supabase Edge Function for CORS-free scraping', 'info');
 
     try {
-      const response = await fetch('/functions/v1/web-scraper', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY || ''}`,
-        },
-        body: JSON.stringify({ config }),
+      // Use Supabase client to invoke the edge function
+      const { data: result, error } = await supabase.functions.invoke('web-scraper', {
+        body: { config }
       });
 
-      if (!response.ok) {
-        throw new Error(`Server error: ${response.status} ${response.statusText}`);
+      if (error) {
+        console.error('Edge function error:', error);
+        throw new Error(`Server error: ${error.message}`);
       }
 
-      const result = await response.json();
+      if (!result) {
+        throw new Error('No data returned from server');
+      }
 
       if (result.error) {
         throw new Error(result.error);
@@ -42,13 +42,21 @@ export class ServerScraper {
 
       return result;
     } catch (error) {
-      onLog?.(`Server scraping failed: ${error}`, 'error');
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      onLog?.(`Server scraping failed: ${errorMessage}`, 'error');
+      console.error('ServerScraper error:', error);
       throw error;
     }
   }
 
   static isAvailable(): boolean {
-    // Check if we have Supabase configuration
-    return !!(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY);
+    // Check if Supabase client is properly configured
+    try {
+      // Simple check to see if supabase client exists and has the functions property
+      return !!(supabase && supabase.functions);
+    } catch (error) {
+      console.error('Supabase availability check failed:', error);
+      return false;
+    }
   }
 }
