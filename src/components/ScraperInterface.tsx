@@ -185,10 +185,11 @@ const ScraperInterface = () => {
       });
 
     } catch (error) {
-      addLog(`Scraping failed: ${error}`, 'error');
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      addLog(`Scraping failed: ${errorMessage}`, 'error');
       toast({
         title: "Scraping Failed",
-        description: error as string,
+        description: errorMessage,
         variant: "destructive"
       });
     } finally {
