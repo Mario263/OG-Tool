@@ -42,7 +42,7 @@ class ServerScraper {
   }
 
   async scrape(): Promise<ScrapingResult> {
-    console.log(`Starting scrape for ${this.config.targetUrl}`);
+    console.log(`Starting enhanced server-side scraping for: ${this.config.targetUrl}`);
     this.urlQueue.push({ url: this.config.targetUrl, depth: 0 });
 
     let processedCount = 0;
@@ -59,14 +59,40 @@ class ServerScraper {
         this.visitedUrls.add(url);
         processedCount++;
 
-        console.log(`Scraping page ${processedCount}/${maxPages}: ${url}`);
+        console.log(`Fetching: ${url}`);
 
-        const pageData = await this.scrapePage(url, depth);
-        
-        if (pageData) {
-          this.results.push(pageData);
-          console.log(`Extracted content: "${pageData.title}"`);
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+          }
+        });
+
+        if (!response.ok) {
+          console.error(`HTTP ${response.status}: ${response.statusText} for ${url}`);
+          continue;
         }
+
+        const html = await response.text();
+        console.log(`Received HTML of length: ${html.length}`);
+        
+        // Extract content from this page
+        const pageContent = this.extractContent(html, url);
+        if (pageContent) {
+          this.results.push(pageContent);
+          console.log(`✅ Extracted 1 items from ${url}`);
+        }
+
+        // Extract and queue new links for further scraping
+        const newLinks = this.extractLinks(html, url, depth);
+        console.log(`Found ${newLinks.length} new links on ${url}`);
+        
+        newLinks.forEach(link => {
+          if (!this.visitedUrls.has(link) && this.isSameDomain(link) && !this.isExcludedPath(link)) {
+            this.urlQueue.push({ url: link, depth: depth + 1 });
+          }
+        });
 
         if (this.config.delayMs > 0) {
           await this.delay(this.config.delayMs);
@@ -78,8 +104,7 @@ class ServerScraper {
     }
 
     const teamId = this.extractTeamId(this.domain);
-    
-    console.log(`Scraping completed! Processed ${processedCount} pages, extracted ${this.results.length} items`);
+    console.log(`🏁 Scraping completed. Visited ${processedCount} pages, extracted ${this.results.length} items`);
     
     return {
       team_id: teamId,
@@ -87,89 +112,111 @@ class ServerScraper {
     };
   }
 
-  private async scrapePage(url: string, depth: number): Promise<ScrapedItem | null> {
-    try {
-      console.log(`Fetching URL: ${url}`);
-      
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-        }
-      });
-
-      if (!response.ok) {
-        console.error(`HTTP ${response.status}: ${response.statusText} for ${url}`);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const html = await response.text();
-      console.log(`Successfully fetched ${html.length} characters from ${url}`);
-      
-      return this.processPageContent(html, url, depth);
-    } catch (error) {
-      console.error(`Failed to fetch ${url}:`, error);
-      return null;
-    }
-  }
-
-  private processPageContent(html: string, url: string, depth: number): ScrapedItem | null {
-    const content = this.extractContent(html, url);
-    const links = this.extractLinks(html, url, depth);
-    
-    // Add new links to queue
-    links.forEach(link => {
-      if (!this.visitedUrls.has(link) && this.isSameDomain(link)) {
-        this.urlQueue.push({ url: link, depth: depth + 1 });
-      }
-    });
-
-    return content;
-  }
-
   private extractContent(html: string, url: string): ScrapedItem | null {
+    console.log(`Extracting content from: ${url}`);
+    
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
 
-    if (!doc) return null;
-
-    const titleElement = doc.querySelector('title');
-    const title = titleElement?.textContent?.trim() || 'Untitled';
-
-    // Remove unwanted elements
-    const unwantedSelectors = ['script', 'style', 'nav', 'header', 'footer', 'aside', '.ad', '.advertisement'];
-    unwantedSelectors.forEach(selector => {
-      const elements = doc.querySelectorAll(selector);
-      elements.forEach(el => el.remove());
-    });
-
-    // Extract main content
-    const contentSelectors = ['main', 'article', '.content', '.post', '.entry', 'body'];
-    let contentElement = null;
-
-    for (const selector of contentSelectors) {
-      contentElement = doc.querySelector(selector);
-      if (contentElement) break;
-    }
-
-    if (!contentElement) {
-      contentElement = doc.querySelector('body');
-    }
-
-    let content = contentElement?.textContent?.trim() || '';
-    content = content.replace(/\s+/g, ' ').trim();
-
-    if (content.length < 100) {
+    if (!doc) {
+      console.log('Failed to parse HTML');
       return null;
     }
 
-    const contentType = this.detectContentType(title, content, url);
-    const author = this.extractAuthor(html);
+    console.log(`HTML length: ${html.length} characters`);
 
+    // Extract title
+    const titleElement = doc.querySelector('title');
+    const title = titleElement?.textContent?.trim() || 'Untitled';
+    console.log(`Extracted title: ${title}`);
+
+    // Try multiple content extraction strategies
+    let content = '';
+    let contentFound = false;
+
+    // Strategy 1: Look for article or main content
+    const contentSelectors = [
+      'article',
+      'main', 
+      '[role="main"]',
+      '.post-content',
+      '.article-content',
+      '.entry-content',
+      '.blog-post',
+      '.content'
+    ];
+
+    for (const selector of contentSelectors) {
+      const contentElement = doc.querySelector(selector);
+      if (contentElement) {
+        console.log(`Found ${selector} tag`);
+        content = this.cleanTextContent(contentElement.textContent || '');
+        if (content.length > 200) {
+          console.log(`Strategy 1 succeeded with ${content.length} characters`);
+          contentFound = true;
+          break;
+        }
+      }
+    }
+
+    // Strategy 2: Look for main tag and extract substantial content
+    if (!contentFound) {
+      const mainElement = doc.querySelector('main');
+      if (mainElement) {
+        console.log('Found main tag');
+        content = this.cleanTextContent(mainElement.textContent || '');
+        if (content.length > 200) {
+          console.log(`Strategy 2 succeeded with ${content.length} characters`);
+          contentFound = true;
+        }
+      }
+    }
+
+    // Strategy 3: Fall back to body but remove navigation/header/footer
+    if (!contentFound) {
+      console.log('All strategies failed, using body content');
+      const unwantedSelectors = ['script', 'style', 'nav', 'header', 'footer', 'aside', '.ad', '.advertisement'];
+      unwantedSelectors.forEach(selector => {
+        const elements = doc.querySelectorAll(selector);
+        elements.forEach(el => el.remove());
+      });
+
+      const bodyElement = doc.querySelector('body');
+      if (bodyElement) {
+        content = this.cleanTextContent(bodyElement.textContent || '');
+      }
+    }
+
+    console.log(`Final content length: ${content.length} characters`);
+
+    // Check if content is substantial
+    const hasSubstantialContent = content.length > 200;
+    console.log(`Has substantial content: ${hasSubstantialContent}`);
+
+    // Additional check for expected content patterns
+    const hasExpectedContent = content.toLowerCase().includes('read') || 
+                              content.toLowerCase().includes('article') ||
+                              content.toLowerCase().includes('blog') ||
+                              content.length > 500;
+    console.log(`Has expected content: ${hasExpectedContent}`);
+
+    if (!hasSubstantialContent) {
+      console.log('Content too short, skipping');
+      return null;
+    }
+
+    // Extract author
+    const author = this.extractAuthor(html);
+    console.log(`Extracted author: ${author}`);
+
+    // Detect content type
+    const contentType = this.detectContentType(title, content, url);
+
+    console.log('Successfully created content item');
+    
     return {
       title,
-      content,
+      content: content.slice(0, 10000), // Limit content length
       content_type: contentType,
       source_url: url,
       author,
@@ -192,7 +239,8 @@ class ServerScraper {
         if (href) {
           const absoluteUrl = new URL(href, baseUrl).href;
           
-          if (this.isSameDomain(absoluteUrl) && !this.isExcludedPath(absoluteUrl)) {
+          // Only include links from same domain that look like content
+          if (this.isSameDomain(absoluteUrl) && this.isContentLink(absoluteUrl, link.textContent || '')) {
             links.push(absoluteUrl);
           }
         }
@@ -202,6 +250,46 @@ class ServerScraper {
     });
 
     return [...new Set(links)];
+  }
+
+  private isContentLink(url: string, linkText: string): boolean {
+    const lowerUrl = url.toLowerCase();
+    const lowerText = linkText.toLowerCase();
+    
+    // Include links that look like blog posts, articles, or content
+    const contentPatterns = [
+      /\/blog\//,
+      /\/article/,
+      /\/post/,
+      /\/news/,
+      /\/guide/,
+      /\/tutorial/,
+      /\/story/,
+      /\d{4}\/\d{2}/, // Date patterns like 2024/01
+    ];
+
+    const isContentUrl = contentPatterns.some(pattern => pattern.test(lowerUrl));
+    
+    // Also include links with content-suggesting text
+    const contentTextPatterns = [
+      'read more',
+      'continue reading',
+      'full article',
+      'learn more',
+      'view post',
+      'read article'
+    ];
+    
+    const isContentText = contentTextPatterns.some(pattern => lowerText.includes(pattern));
+    
+    return isContentUrl || isContentText;
+  }
+
+  private cleanTextContent(text: string): string {
+    return text
+      .replace(/\s+/g, ' ')
+      .replace(/\n+/g, '\n')
+      .trim();
   }
 
   private detectContentType(title: string, content: string, url: string): string {
