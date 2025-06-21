@@ -80,23 +80,31 @@ class ServerScraper {
         const html = await response.text();
         console.log(`Received HTML of length: ${html.length}`);
         
-        // Extract content from this page
-        const pageContent = this.extractContent(html, url);
-        if (pageContent) {
-          this.results.push(pageContent);
-          console.log(`✅ Extracted content from ${url}: "${pageContent.title}"`);
-        }
-
-        // Extract and queue new links for further scraping
-        const newLinks = this.extractLinks(html, url, depth);
-        console.log(`Found ${newLinks.length} potential article links on ${url}`);
-        
-        newLinks.forEach(link => {
-          if (!this.visitedUrls.has(link) && this.isValidTargetUrl(link)) {
-            this.urlQueue.push({ url: link, depth: depth + 1 });
-            console.log(`Queued for scraping: ${link}`);
+        // Check if this is a blog listing page or an individual article
+        if (this.isBlogListingPage(url)) {
+          console.log(`Processing blog listing page: ${url}`);
+          // Extract article links from the listing page
+          const articleLinks = this.extractArticleLinks(html, url);
+          console.log(`Found ${articleLinks.length} article links on listing page`);
+          
+          // Add article links to queue with higher priority (depth 0)
+          articleLinks.forEach(link => {
+            if (!this.visitedUrls.has(link)) {
+              this.urlQueue.unshift({ url: link, depth: 1 }); // Use unshift to prioritize article links
+              console.log(`Queued article for scraping: ${link}`);
+            }
+          });
+          
+          // Don't extract content from listing page itself
+        } else {
+          // This is an individual article page - extract its content
+          console.log(`Processing individual article: ${url}`);
+          const pageContent = this.extractContent(html, url);
+          if (pageContent) {
+            this.results.push(pageContent);
+            console.log(`✅ Extracted article content: "${pageContent.title}"`);
           }
-        });
+        }
 
         if (this.config.delayMs > 0) {
           await this.delay(this.config.delayMs);
@@ -114,6 +122,127 @@ class ServerScraper {
       team_id: teamId,
       items: this.results
     };
+  }
+
+  private isBlogListingPage(url: string): boolean {
+    const lowerUrl = url.toLowerCase();
+    
+    // Check if this looks like a blog listing page
+    const listingPatterns = [
+      /\/blog\/?$/,           // /blog or /blog/
+      /\/blog\/page\/\d+/,    // /blog/page/1
+      /\/articles\/?$/,       // /articles
+      /\/posts\/?$/,          // /posts
+      /\/news\/?$/            // /news
+    ];
+    
+    return listingPatterns.some(pattern => pattern.test(lowerUrl));
+  }
+
+  private extractArticleLinks(html: string, baseUrl: string): string[] {
+    console.log(`Extracting article links from: ${baseUrl}`);
+    
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const links: string[] = [];
+
+    if (!doc) return links;
+
+    // Look for links that are likely to be individual articles
+    const linkElements = doc.querySelectorAll('a[href]');
+    
+    linkElements.forEach(link => {
+      try {
+        const href = link.getAttribute('href');
+        const linkText = link.textContent?.toLowerCase() || '';
+        
+        if (href) {
+          const absoluteUrl = new URL(href, baseUrl).href;
+          
+          // Check if this link looks like an individual article
+          if (this.isIndividualArticleLink(absoluteUrl, linkText, baseUrl)) {
+            links.push(absoluteUrl);
+            console.log(`Found article link: ${absoluteUrl}`);
+          }
+        }
+      } catch {
+        // Invalid URL, skip
+      }
+    });
+
+    return [...new Set(links)]; // Remove duplicates
+  }
+
+  private isIndividualArticleLink(url: string, linkText: string, currentUrl: string): boolean {
+    try {
+      const urlObj = new URL(url);
+      
+      // Must be same domain
+      if (urlObj.hostname !== this.domain) {
+        return false;
+      }
+
+      const lowerUrl = url.toLowerCase();
+      const lowerText = linkText.toLowerCase();
+      
+      // Patterns that indicate individual articles
+      const articlePatterns = [
+        /\/blog\/[^\/]+\/?$/,           // /blog/article-title
+        /\/blog\/\d{4}\/\d{2}\/[^\/]+/, // /blog/2024/01/article-title
+        /\/article\/[^\/]+/,            // /article/title
+        /\/post\/[^\/]+/,               // /post/title
+        /\/[^\/]+\/$/ // Any single path segment ending with /
+      ];
+      
+      // Check if URL matches article patterns
+      const hasArticlePattern = articlePatterns.some(pattern => pattern.test(lowerUrl));
+      
+      // Check for "read more" type links
+      const readMoreTexts = [
+        'read more',
+        'continue reading',
+        'full article',
+        'read full',
+        'learn more',
+        'view post',
+        'read article',
+        'more details',
+        'read story'
+      ];
+      
+      const isReadMoreLink = readMoreTexts.some(text => lowerText.includes(text));
+      
+      // Exclude certain patterns that are not articles
+      const excludePatterns = [
+        /\.(jpg|jpeg|png|gif|svg|pdf)$/i,
+        /\/tag\//,
+        /\/category\//,
+        /\/author\//,
+        /\/search/,
+        /\/login/,
+        /\/register/,
+        /\/contact/,
+        /\/about/,
+        /#/
+      ];
+      
+      const shouldExclude = excludePatterns.some(pattern => pattern.test(lowerUrl));
+      
+      if (shouldExclude) {
+        return false;
+      }
+      
+      // Include if it has article pattern OR is a read more link
+      const shouldInclude = hasArticlePattern || isReadMoreLink;
+      
+      if (shouldInclude) {
+        console.log(`Valid article link: ${url} (pattern: ${hasArticlePattern}, readMore: ${isReadMoreLink})`);
+      }
+      
+      return shouldInclude;
+    } catch {
+      return false;
+    }
   }
 
   private extractContent(html: string, url: string): ScrapedItem | null {
@@ -139,7 +268,7 @@ class ServerScraper {
     
     console.log(`Extracted title: ${title}`);
 
-    // Try multiple content extraction strategies
+    // Try multiple content extraction strategies for individual articles
     let content = '';
     let contentFound = false;
 
@@ -154,7 +283,9 @@ class ServerScraper {
       '.blog-post',
       '.content',
       '.post-body',
-      '.article-body'
+      '.article-body',
+      '.single-post',
+      '.post-single'
     ];
 
     for (const selector of contentSelectors) {
@@ -170,10 +301,16 @@ class ServerScraper {
       }
     }
 
-    // Strategy 2: Fall back to body but remove navigation/header/footer
+    // Strategy 2: Look for content between common markers
     if (!contentFound) {
-      console.log('Using body content strategy');
-      const unwantedSelectors = ['script', 'style', 'nav', 'header', 'footer', 'aside', '.sidebar', '.menu', '.navigation', '.ad', '.advertisement'];
+      console.log('Trying content between markers strategy');
+      
+      // Remove unwanted elements first
+      const unwantedSelectors = [
+        'script', 'style', 'nav', 'header', 'footer', 'aside', 
+        '.sidebar', '.menu', '.navigation', '.ad', '.advertisement',
+        '.social-share', '.related-posts', '.comments'
+      ];
       
       // Clone the document to avoid modifying the original
       const bodyClone = doc.querySelector('body')?.cloneNode(true);
@@ -182,15 +319,20 @@ class ServerScraper {
           const elements = (bodyClone as any).querySelectorAll(selector);
           elements.forEach((el: any) => el.remove());
         });
+        
         content = this.cleanTextContent(bodyClone.textContent || '');
+        if (content.length > 200) {
+          contentFound = true;
+          console.log(`Strategy 2 succeeded with ${content.length} characters`);
+        }
       }
     }
 
     console.log(`Final content length: ${content.length} characters`);
 
-    // Check if content is substantial
-    if (content.length < 200) {
-      console.log('Content too short, skipping');
+    // Check if content is substantial enough for an individual article
+    if (content.length < 500) { // Increased threshold for individual articles
+      console.log('Content too short for individual article, skipping');
       return null;
     }
 
@@ -211,111 +353,6 @@ class ServerScraper {
       author,
       user_id: author ? this.generateUserId(author) : undefined
     };
-  }
-
-  private extractLinks(html: string, baseUrl: string, depth: number): string[] {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, 'text/html');
-    const links: string[] = [];
-
-    if (!doc) return links;
-
-    const linkElements = doc.querySelectorAll('a[href]');
-    
-    linkElements.forEach(link => {
-      try {
-        const href = link.getAttribute('href');
-        if (href) {
-          const absoluteUrl = new URL(href, baseUrl).href;
-          
-          // Only include links that look like blog articles or are within the blog section
-          if (this.isValidBlogLink(absoluteUrl, link.textContent || '', baseUrl)) {
-            links.push(absoluteUrl);
-          }
-        }
-      } catch {
-        // Invalid URL, skip
-      }
-    });
-
-    return [...new Set(links)];
-  }
-
-  private isValidBlogLink(url: string, linkText: string, currentUrl: string): boolean {
-    try {
-      const urlObj = new URL(url);
-      const currentUrlObj = new URL(currentUrl);
-      
-      // Must be same domain
-      if (urlObj.hostname !== this.domain) {
-        return false;
-      }
-
-      const lowerUrl = url.toLowerCase();
-      const lowerText = linkText.toLowerCase();
-      
-      // If we're on a blog page, look for article patterns
-      if (currentUrl.includes('/blog')) {
-        // Look for URLs that contain blog patterns
-        const blogPatterns = [
-          /\/blog\/[^\/]+\/?$/, // Direct blog post URLs like /blog/post-title
-          /\/\d{4}\/\d{2}\//, // Date patterns like /2024/01/
-          /\/article\//, // Article URLs
-          /\/post\//, // Post URLs
-        ];
-
-        const hasValidPattern = blogPatterns.some(pattern => pattern.test(lowerUrl));
-        
-        // Also check for common article link text
-        const articleLinkTexts = [
-          'read more',
-          'continue reading',
-          'full article',
-          'read full',
-          'learn more',
-          'view post',
-          'read article',
-          'more details'
-        ];
-        
-        const hasArticleLinkText = articleLinkTexts.some(text => lowerText.includes(text));
-        
-        // Include if it has valid pattern OR article link text
-        if (hasValidPattern || hasArticleLinkText) {
-          console.log(`Valid blog link found: ${url} (pattern: ${hasValidPattern}, text: ${hasArticleLinkText})`);
-          return true;
-        }
-      }
-      
-      // If starting URL contains blog, prefer to stay in blog section
-      if (this.config.targetUrl.includes('/blog')) {
-        return lowerUrl.includes('/blog');
-      }
-      
-      return false;
-    } catch {
-      return false;
-    }
-  }
-
-  private isValidTargetUrl(url: string): boolean {
-    try {
-      const urlObj = new URL(url);
-      
-      // Must be same domain
-      if (urlObj.hostname !== this.domain) {
-        return false;
-      }
-      
-      // Exclude certain file types and paths
-      if (this.isExcludedPath(url)) {
-        return false;
-      }
-      
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   private cleanTextContent(text: string): string {
