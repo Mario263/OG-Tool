@@ -35,10 +35,13 @@ class ServerScraper {
   private urlQueue: Array<{url: string, depth: number}> = [];
   private results: ScrapedItem[] = [];
   private domain: string;
+  private basePath: string;
 
   constructor(config: ScrapingConfig) {
     this.config = config;
-    this.domain = new URL(config.targetUrl).hostname;
+    const url = new URL(config.targetUrl);
+    this.domain = url.hostname;
+    this.basePath = url.pathname;
   }
 
   async scrape(): Promise<ScrapingResult> {
@@ -81,16 +84,17 @@ class ServerScraper {
         const pageContent = this.extractContent(html, url);
         if (pageContent) {
           this.results.push(pageContent);
-          console.log(`✅ Extracted 1 items from ${url}`);
+          console.log(`✅ Extracted content from ${url}: "${pageContent.title}"`);
         }
 
         // Extract and queue new links for further scraping
         const newLinks = this.extractLinks(html, url, depth);
-        console.log(`Found ${newLinks.length} new links on ${url}`);
+        console.log(`Found ${newLinks.length} potential article links on ${url}`);
         
         newLinks.forEach(link => {
-          if (!this.visitedUrls.has(link) && this.isSameDomain(link) && !this.isExcludedPath(link)) {
+          if (!this.visitedUrls.has(link) && this.isValidTargetUrl(link)) {
             this.urlQueue.push({ url: link, depth: depth + 1 });
+            console.log(`Queued for scraping: ${link}`);
           }
         });
 
@@ -123,33 +127,40 @@ class ServerScraper {
       return null;
     }
 
-    console.log(`HTML length: ${html.length} characters`);
-
     // Extract title
     const titleElement = doc.querySelector('title');
-    const title = titleElement?.textContent?.trim() || 'Untitled';
+    let title = titleElement?.textContent?.trim() || 'Untitled';
+    
+    // Try to get a better title from the page content
+    const h1Element = doc.querySelector('h1');
+    if (h1Element?.textContent?.trim()) {
+      title = h1Element.textContent.trim();
+    }
+    
     console.log(`Extracted title: ${title}`);
 
     // Try multiple content extraction strategies
     let content = '';
     let contentFound = false;
 
-    // Strategy 1: Look for article or main content
+    // Strategy 1: Look for article or main content containers
     const contentSelectors = [
       'article',
-      'main', 
       '[role="main"]',
+      'main',
       '.post-content',
       '.article-content',
       '.entry-content',
       '.blog-post',
-      '.content'
+      '.content',
+      '.post-body',
+      '.article-body'
     ];
 
     for (const selector of contentSelectors) {
       const contentElement = doc.querySelector(selector);
       if (contentElement) {
-        console.log(`Found ${selector} tag`);
+        console.log(`Found content using selector: ${selector}`);
         content = this.cleanTextContent(contentElement.textContent || '');
         if (content.length > 200) {
           console.log(`Strategy 1 succeeded with ${content.length} characters`);
@@ -159,55 +170,33 @@ class ServerScraper {
       }
     }
 
-    // Strategy 2: Look for main tag and extract substantial content
+    // Strategy 2: Fall back to body but remove navigation/header/footer
     if (!contentFound) {
-      const mainElement = doc.querySelector('main');
-      if (mainElement) {
-        console.log('Found main tag');
-        content = this.cleanTextContent(mainElement.textContent || '');
-        if (content.length > 200) {
-          console.log(`Strategy 2 succeeded with ${content.length} characters`);
-          contentFound = true;
-        }
-      }
-    }
-
-    // Strategy 3: Fall back to body but remove navigation/header/footer
-    if (!contentFound) {
-      console.log('All strategies failed, using body content');
-      const unwantedSelectors = ['script', 'style', 'nav', 'header', 'footer', 'aside', '.ad', '.advertisement'];
-      unwantedSelectors.forEach(selector => {
-        const elements = doc.querySelectorAll(selector);
-        elements.forEach(el => el.remove());
-      });
-
-      const bodyElement = doc.querySelector('body');
-      if (bodyElement) {
-        content = this.cleanTextContent(bodyElement.textContent || '');
+      console.log('Using body content strategy');
+      const unwantedSelectors = ['script', 'style', 'nav', 'header', 'footer', 'aside', '.sidebar', '.menu', '.navigation', '.ad', '.advertisement'];
+      
+      // Clone the document to avoid modifying the original
+      const bodyClone = doc.querySelector('body')?.cloneNode(true);
+      if (bodyClone) {
+        unwantedSelectors.forEach(selector => {
+          const elements = (bodyClone as any).querySelectorAll(selector);
+          elements.forEach((el: any) => el.remove());
+        });
+        content = this.cleanTextContent(bodyClone.textContent || '');
       }
     }
 
     console.log(`Final content length: ${content.length} characters`);
 
     // Check if content is substantial
-    const hasSubstantialContent = content.length > 200;
-    console.log(`Has substantial content: ${hasSubstantialContent}`);
-
-    // Additional check for expected content patterns
-    const hasExpectedContent = content.toLowerCase().includes('read') || 
-                              content.toLowerCase().includes('article') ||
-                              content.toLowerCase().includes('blog') ||
-                              content.length > 500;
-    console.log(`Has expected content: ${hasExpectedContent}`);
-
-    if (!hasSubstantialContent) {
+    if (content.length < 200) {
       console.log('Content too short, skipping');
       return null;
     }
 
     // Extract author
     const author = this.extractAuthor(html);
-    console.log(`Extracted author: ${author}`);
+    console.log(`Extracted author: ${author || 'Not found'}`);
 
     // Detect content type
     const contentType = this.detectContentType(title, content, url);
@@ -239,8 +228,8 @@ class ServerScraper {
         if (href) {
           const absoluteUrl = new URL(href, baseUrl).href;
           
-          // Only include links from same domain that look like content
-          if (this.isSameDomain(absoluteUrl) && this.isContentLink(absoluteUrl, link.textContent || '')) {
+          // Only include links that look like blog articles or are within the blog section
+          if (this.isValidBlogLink(absoluteUrl, link.textContent || '', baseUrl)) {
             links.push(absoluteUrl);
           }
         }
@@ -252,37 +241,81 @@ class ServerScraper {
     return [...new Set(links)];
   }
 
-  private isContentLink(url: string, linkText: string): boolean {
-    const lowerUrl = url.toLowerCase();
-    const lowerText = linkText.toLowerCase();
-    
-    // Include links that look like blog posts, articles, or content
-    const contentPatterns = [
-      /\/blog\//,
-      /\/article/,
-      /\/post/,
-      /\/news/,
-      /\/guide/,
-      /\/tutorial/,
-      /\/story/,
-      /\d{4}\/\d{2}/, // Date patterns like 2024/01
-    ];
+  private isValidBlogLink(url: string, linkText: string, currentUrl: string): boolean {
+    try {
+      const urlObj = new URL(url);
+      const currentUrlObj = new URL(currentUrl);
+      
+      // Must be same domain
+      if (urlObj.hostname !== this.domain) {
+        return false;
+      }
 
-    const isContentUrl = contentPatterns.some(pattern => pattern.test(lowerUrl));
-    
-    // Also include links with content-suggesting text
-    const contentTextPatterns = [
-      'read more',
-      'continue reading',
-      'full article',
-      'learn more',
-      'view post',
-      'read article'
-    ];
-    
-    const isContentText = contentTextPatterns.some(pattern => lowerText.includes(pattern));
-    
-    return isContentUrl || isContentText;
+      const lowerUrl = url.toLowerCase();
+      const lowerText = linkText.toLowerCase();
+      
+      // If we're on a blog page, look for article patterns
+      if (currentUrl.includes('/blog')) {
+        // Look for URLs that contain blog patterns
+        const blogPatterns = [
+          /\/blog\/[^\/]+\/?$/, // Direct blog post URLs like /blog/post-title
+          /\/\d{4}\/\d{2}\//, // Date patterns like /2024/01/
+          /\/article\//, // Article URLs
+          /\/post\//, // Post URLs
+        ];
+
+        const hasValidPattern = blogPatterns.some(pattern => pattern.test(lowerUrl));
+        
+        // Also check for common article link text
+        const articleLinkTexts = [
+          'read more',
+          'continue reading',
+          'full article',
+          'read full',
+          'learn more',
+          'view post',
+          'read article',
+          'more details'
+        ];
+        
+        const hasArticleLinkText = articleLinkTexts.some(text => lowerText.includes(text));
+        
+        // Include if it has valid pattern OR article link text
+        if (hasValidPattern || hasArticleLinkText) {
+          console.log(`Valid blog link found: ${url} (pattern: ${hasValidPattern}, text: ${hasArticleLinkText})`);
+          return true;
+        }
+      }
+      
+      // If starting URL contains blog, prefer to stay in blog section
+      if (this.config.targetUrl.includes('/blog')) {
+        return lowerUrl.includes('/blog');
+      }
+      
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  private isValidTargetUrl(url: string): boolean {
+    try {
+      const urlObj = new URL(url);
+      
+      // Must be same domain
+      if (urlObj.hostname !== this.domain) {
+        return false;
+      }
+      
+      // Exclude certain file types and paths
+      if (this.isExcludedPath(url)) {
+        return false;
+      }
+      
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private cleanTextContent(text: string): string {
@@ -334,15 +367,6 @@ class ServerScraper {
       hash = hash & hash;
     }
     return `user_${Math.abs(hash)}`;
-  }
-
-  private isSameDomain(url: string): boolean {
-    try {
-      const urlDomain = new URL(url).hostname;
-      return urlDomain === this.domain || urlDomain.endsWith(`.${this.domain}`);
-    } catch {
-      return false;
-    }
   }
 
   private isExcludedPath(url: string): boolean {
