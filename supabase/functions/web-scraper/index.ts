@@ -1,3 +1,4 @@
+
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { DOMParser } from "https://deno.land/x/deno_dom@v0.1.38/deno-dom-wasm.ts"
 
@@ -35,13 +36,13 @@ class ServerScraper {
   private urlQueue: Array<{url: string, depth: number}> = [];
   private results: ScrapedItem[] = [];
   private domain: string;
-  private basePath: string;
+  private originalUrl: string;
 
   constructor(config: ScrapingConfig) {
     this.config = config;
+    this.originalUrl = config.targetUrl;
     const url = new URL(config.targetUrl);
     this.domain = url.hostname;
-    this.basePath = url.pathname;
   }
 
   async scrape(): Promise<ScrapingResult> {
@@ -80,22 +81,21 @@ class ServerScraper {
         const html = await response.text();
         console.log(`Received HTML of length: ${html.length}`);
         
-        // Check if this is a blog listing page or an individual article
-        if (this.isBlogListingPage(url)) {
-          console.log(`Processing blog listing page: ${url}`);
-          // Extract article links from the listing page
+        // If this is the original URL (starting point), extract article links
+        if (url === this.originalUrl) {
+          console.log(`Processing starting page: ${url}`);
           const articleLinks = this.extractArticleLinks(html, url);
-          console.log(`Found ${articleLinks.length} article links on listing page`);
+          console.log(`Found ${articleLinks.length} article links on starting page`);
           
-          // Add article links to queue with higher priority (depth 0)
+          // Add article links to queue for scraping
           articleLinks.forEach(link => {
             if (!this.visitedUrls.has(link)) {
-              this.urlQueue.unshift({ url: link, depth: 1 }); // Use unshift to prioritize article links
+              this.urlQueue.push({ url: link, depth: 1 });
               console.log(`Queued article for scraping: ${link}`);
             }
           });
           
-          // Don't extract content from listing page itself
+          // Don't extract content from the listing page itself
         } else {
           // This is an individual article page - extract its content
           console.log(`Processing individual article: ${url}`);
@@ -124,21 +124,6 @@ class ServerScraper {
     };
   }
 
-  private isBlogListingPage(url: string): boolean {
-    const lowerUrl = url.toLowerCase();
-    
-    // Check if this looks like a blog listing page
-    const listingPatterns = [
-      /\/blog\/?$/,           // /blog or /blog/
-      /\/blog\/page\/\d+/,    // /blog/page/1
-      /\/articles\/?$/,       // /articles
-      /\/posts\/?$/,          // /posts
-      /\/news\/?$/            // /news
-    ];
-    
-    return listingPatterns.some(pattern => pattern.test(lowerUrl));
-  }
-
   private extractArticleLinks(html: string, baseUrl: string): string[] {
     console.log(`Extracting article links from: ${baseUrl}`);
     
@@ -160,9 +145,9 @@ class ServerScraper {
           const absoluteUrl = new URL(href, baseUrl).href;
           
           // Check if this link looks like an individual article
-          if (this.isIndividualArticleLink(absoluteUrl, linkText, baseUrl)) {
+          if (this.isIndividualArticleLink(absoluteUrl, linkText, link)) {
             links.push(absoluteUrl);
-            console.log(`Found article link: ${absoluteUrl}`);
+            console.log(`Found article link: ${absoluteUrl} (text: "${linkText.slice(0, 50)}")`);
           }
         }
       } catch {
@@ -173,7 +158,7 @@ class ServerScraper {
     return [...new Set(links)]; // Remove duplicates
   }
 
-  private isIndividualArticleLink(url: string, linkText: string, currentUrl: string): boolean {
+  private isIndividualArticleLink(url: string, linkText: string, linkElement: any): boolean {
     try {
       const urlObj = new URL(url);
       
@@ -185,19 +170,7 @@ class ServerScraper {
       const lowerUrl = url.toLowerCase();
       const lowerText = linkText.toLowerCase();
       
-      // Patterns that indicate individual articles
-      const articlePatterns = [
-        /\/blog\/[^\/]+\/?$/,           // /blog/article-title
-        /\/blog\/\d{4}\/\d{2}\/[^\/]+/, // /blog/2024/01/article-title
-        /\/article\/[^\/]+/,            // /article/title
-        /\/post\/[^\/]+/,               // /post/title
-        /\/[^\/]+\/$/ // Any single path segment ending with /
-      ];
-      
-      // Check if URL matches article patterns
-      const hasArticlePattern = articlePatterns.some(pattern => pattern.test(lowerUrl));
-      
-      // Check for "read more" type links
+      // Look for "read more" type links
       const readMoreTexts = [
         'read more',
         'continue reading',
@@ -212,6 +185,27 @@ class ServerScraper {
       
       const isReadMoreLink = readMoreTexts.some(text => lowerText.includes(text));
       
+      // Look for links that go to specific articles (not the same page or listing pages)
+      const isDifferentFromBase = url !== this.originalUrl;
+      const isNotListingPage = !this.isListingPage(url);
+      
+      // Check if the link element is inside an article preview or blog post summary
+      const parentHTML = linkElement.parentNode?.innerHTML || '';
+      const isInArticleContext = parentHTML.includes('article') || 
+                                parentHTML.includes('post') || 
+                                parentHTML.includes('blog');
+      
+      // Patterns that indicate individual articles
+      const articlePatterns = [
+        /\/blog\/[^\/]+\/?$/,           // /blog/article-title
+        /\/blog\/\d{4}\/\d{2}\/[^\/]+/, // /blog/2024/01/article-title
+        /\/article\/[^\/]+/,            // /article/title
+        /\/post\/[^\/]+/,               // /post/title
+        /\/[^\/]+\/$/ // Any single path segment ending with /
+      ];
+      
+      const hasArticlePattern = articlePatterns.some(pattern => pattern.test(lowerUrl));
+      
       // Exclude certain patterns that are not articles
       const excludePatterns = [
         /\.(jpg|jpeg|png|gif|svg|pdf)$/i,
@@ -223,7 +217,10 @@ class ServerScraper {
         /\/register/,
         /\/contact/,
         /\/about/,
-        /#/
+        /#/,
+        /\/page\/\d+/, // pagination
+        /\/archive/,
+        /\/sitemap/
       ];
       
       const shouldExclude = excludePatterns.some(pattern => pattern.test(lowerUrl));
@@ -232,17 +229,32 @@ class ServerScraper {
         return false;
       }
       
-      // Include if it has article pattern OR is a read more link
-      const shouldInclude = hasArticlePattern || isReadMoreLink;
-      
-      if (shouldInclude) {
-        console.log(`Valid article link: ${url} (pattern: ${hasArticlePattern}, readMore: ${isReadMoreLink})`);
-      }
+      // Include if it's a read more link OR has article pattern OR is in article context and different from base
+      const shouldInclude = isReadMoreLink || 
+                           (hasArticlePattern && isDifferentFromBase && isNotListingPage) ||
+                           (isInArticleContext && isDifferentFromBase && isNotListingPage);
       
       return shouldInclude;
     } catch {
       return false;
     }
+  }
+
+  private isListingPage(url: string): boolean {
+    const lowerUrl = url.toLowerCase();
+    
+    const listingPatterns = [
+      /\/blog\/?$/,           // /blog or /blog/
+      /\/blog\/page\/\d+/,    // /blog/page/1
+      /\/articles\/?$/,       // /articles
+      /\/posts\/?$/,          // /posts
+      /\/news\/?$/,           // /news
+      /\/archive/,            // /archive
+      /\/category/,           // /category
+      /\/tag/                 // /tag
+    ];
+    
+    return listingPatterns.some(pattern => pattern.test(lowerUrl));
   }
 
   private extractContent(html: string, url: string): ScrapedItem | null {
@@ -404,23 +416,6 @@ class ServerScraper {
       hash = hash & hash;
     }
     return `user_${Math.abs(hash)}`;
-  }
-
-  private isExcludedPath(url: string): boolean {
-    const excludedPatterns = [
-      /\.(jpg|jpeg|png|gif|svg|pdf|doc|docx|zip|rar)$/i,
-      /\/api\//,
-      /\/admin\//,
-      /\/login/,
-      /\/logout/,
-      /\/register/,
-      /\/search/,
-      /\/tag\//,
-      /\/category\//,
-      /#/
-    ];
-
-    return excludedPatterns.some(pattern => pattern.test(url));
   }
 
   private extractTeamId(domain: string): string {
